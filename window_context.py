@@ -52,6 +52,47 @@ def get_active_window_info():
         return None
 
 
+def list_open_windows():
+    """
+    Enumerates all visible windows.
+    Returns:
+        list: List of dicts {"hwnd": int, "title": str, "process_name": str}
+    """
+    if not win32gui:
+        logger.error("win32gui not available.")
+        return []
+
+    windows = []
+
+    def enum_handler(hwnd, ctx):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if title:
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    try:
+                        proc = psutil.Process(pid)
+                        proc_name = proc.name()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        proc_name = "Unknown"
+
+                    windows.append({
+                        "hwnd": hwnd,
+                        "title": title,
+                        "process_name": proc_name,
+                        "pid": pid
+                    })
+                except Exception:
+                    pass
+
+    try:
+        win32gui.EnumWindows(enum_handler, None)
+    except Exception as e:
+        logger.error(f"Error enumerating windows: {e}")
+
+    return windows
+
+
 def extract_text_uia(hwnd):
     """
     Extracts text from the window with the given hwnd using UI Automation.
