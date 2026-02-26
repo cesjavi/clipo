@@ -15,27 +15,68 @@ logger = logging.getLogger(__name__)
 class WinAutomationApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Windows 10 Automation Assistant (GUI)")
-        self.root.geometry("900x700")
+        self.root.title("Clipo")
+        self.root.geometry("64x64+40+120")
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.configure(bg="#0f172a")
 
         # --- Variables ---
         self.selected_window_var = tk.StringVar()
         self.windows_map = {}  # "Title (Process)" -> window_info_dict
         self.context_text = ""
+        self.last_window_info = None
+
+        # Drag state for floating icon
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+
+        # Assistant panel
+        self.panel = None
 
         # --- Threading ---
         self.msg_queue = queue.Queue()
         self.root.after(100, self.process_queue)
 
         # --- Layout ---
-        self.create_widgets()
+        self.create_floating_widget()
+        self.create_panel_window()
 
         # Initial load
         self.refresh_windows()
 
-    def create_widgets(self):
+    def create_floating_widget(self):
+        icon_btn = tk.Button(
+            self.root,
+            text="🤖",
+            font=("Segoe UI Emoji", 18),
+            bg="#2563eb",
+            fg="white",
+            activebackground="#1d4ed8",
+            activeforeground="white",
+            relief=tk.FLAT,
+            bd=0,
+            command=self.toggle_panel,
+            cursor="hand2",
+        )
+        icon_btn.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # Drag the floating assistant icon
+        icon_btn.bind("<ButtonPress-1>", self._start_drag)
+        icon_btn.bind("<B1-Motion>", self._do_drag)
+
+    def create_panel_window(self):
+        self.panel = tk.Toplevel(self.root)
+        self.panel.title("Clipo Assistant")
+        self.panel.geometry("900x700+120+120")
+        self.panel.withdraw()
+        self.panel.protocol("WM_DELETE_WINDOW", self.hide_panel)
+
+        self.create_widgets(self.panel)
+
+    def create_widgets(self, parent):
         # Top Frame: Window Selection
-        top_frame = ttk.LabelFrame(self.root, text="Target Window", padding=10)
+        top_frame = ttk.LabelFrame(parent, text="Target Window", padding=10)
         top_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(top_frame, text="Select Window:").pack(side=tk.LEFT, padx=5)
@@ -47,8 +88,16 @@ class WinAutomationApp:
         ttk.Button(top_frame, text="Refresh List", command=self.refresh_windows).pack(side=tk.LEFT, padx=5)
         ttk.Button(top_frame, text="Capture Context", command=self.capture_context).pack(side=tk.LEFT, padx=5)
 
+        # Quick action menu for the assistant behavior
+        quick_frame = ttk.LabelFrame(parent, text="¿Qué querés hacer?", padding=8)
+        quick_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        ttk.Button(quick_frame, text="Capturar ventana activa", command=self.capture_active_window).pack(side=tk.LEFT, padx=4)
+        ttk.Button(quick_frame, text="Señalar ventana activa", command=self.highlight_selected_window).pack(side=tk.LEFT, padx=4)
+        ttk.Button(quick_frame, text="Explicar lo que veo", command=self.explain_visible_window).pack(side=tk.LEFT, padx=4)
+
         # Middle Frame: Paned Window (Context vs Chat)
-        paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        paned = ttk.PanedWindow(parent, orient=tk.VERTICAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         # Context Frame (Top Pane)
@@ -82,6 +131,26 @@ class WinAutomationApp:
         self.btn_send.pack(side=tk.LEFT)
 
         ttk.Button(chat_frame, text="Copy Response", command=self.copy_last_response).pack(side=tk.RIGHT, pady=2, padx=5)
+
+    def toggle_panel(self):
+        if self.panel.state() == "withdrawn":
+            self.panel.deiconify()
+            self.panel.attributes("-topmost", True)
+            self.panel.attributes("-topmost", False)
+        else:
+            self.hide_panel()
+
+    def hide_panel(self):
+        self.panel.withdraw()
+
+    def _start_drag(self, event):
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+
+    def _do_drag(self, event):
+        x = self.root.winfo_x() + (event.x - self._drag_start_x)
+        y = self.root.winfo_y() + (event.y - self._drag_start_y)
+        self.root.geometry(f"+{x}+{y}")
 
     def process_queue(self):
         try:
@@ -124,7 +193,59 @@ class WinAutomationApp:
             self.window_combo.current(0)
 
     def on_window_selected(self, event):
-        pass
+        key = self.selected_window_var.get()
+        self.last_window_info = self.windows_map.get(key)
+
+    def capture_active_window(self):
+        info = get_active_window_info()
+        if not info:
+            messagebox.showwarning("Sin ventana", "No pude detectar la ventana activa.")
+            return
+
+        key = f"{info['title']} ({info['process_name']})"
+        self.last_window_info = info
+        self.selected_window_var.set(key)
+        self.windows_map[key] = info
+
+        values = list(self.window_combo["values"])
+        if key not in values:
+            values.append(key)
+            self.window_combo["values"] = sorted(values)
+
+        self.capture_context_from_window(info)
+
+    def capture_context_from_window(self, window_info):
+        self.status(f"Capturing context for {window_info.get('title', 'Unknown')}...")
+        self.txt_context.delete("1.0", tk.END)
+        self.txt_context.insert(tk.END, "Capturing... please wait.")
+        threading.Thread(target=self._capture_worker, args=(window_info,), daemon=True).start()
+
+    def highlight_selected_window(self):
+        window_info = self.last_window_info
+        if not window_info:
+            key = self.selected_window_var.get()
+            window_info = self.windows_map.get(key)
+
+        if not window_info:
+            messagebox.showinfo("Seleccioná una ventana", "Elegí o capturá una ventana para señalarla.")
+            return
+
+        messagebox.showinfo(
+            "Ventana detectada",
+            f"Ventana objetivo:\n{window_info.get('title', 'Unknown')}\n"
+            f"Proceso: {window_info.get('process_name', 'Unknown')}\n"
+            f"HWND: {window_info.get('hwnd', 'N/A')}",
+        )
+
+    def explain_visible_window(self):
+        context = self.txt_context.get("1.0", tk.END).strip()
+        if not context or context == "Capturing... please wait.":
+            self.capture_active_window()
+
+        if not self.entry_question.get().strip():
+            self.entry_question.insert(0, "Explicame brevemente qué muestra esta ventana y qué puedo hacer ahora.")
+
+        self.ask_groq()
 
     def capture_context(self):
         key = self.selected_window_var.get()
@@ -135,11 +256,8 @@ class WinAutomationApp:
         if not window_info:
             return
 
-        self.status(f"Capturing context for {key}...")
-        self.txt_context.delete("1.0", tk.END)
-        self.txt_context.insert(tk.END, "Capturing... please wait.")
-
-        threading.Thread(target=self._capture_worker, args=(window_info,), daemon=True).start()
+        self.last_window_info = window_info
+        self.capture_context_from_window(window_info)
 
     def _capture_worker(self, window_info):
         try:
