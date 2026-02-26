@@ -18,7 +18,7 @@ class GroqClient:
             logger.error(f"Failed to initialize Groq client: {e}")
             self.client = None
 
-    def ask_groq(self, messages, model="llama-3.1-70b-versatile", retries=2, timeout=30):
+    def ask_groq(self, messages, model="llama-3.3-70b-versatile", retries=2, timeout=30):
         """
         Sends a chat completion request to Groq API.
 
@@ -66,5 +66,5 @@ class GroqClient:
 # Singleton instance
 groq_client = GroqClient()
 
-def ask_groq(messages, model="llama-3.1-70b-versatile"):
+def ask_groq(messages, model="llama-3.3-70b-versatile"):
     return groq_client.ask_groq(messages, model=model)

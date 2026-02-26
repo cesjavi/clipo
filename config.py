@@ -2,7 +2,7 @@
 
 class Config:
     MAX_CHARS = 4000
-    GROQ_MODEL = "llama-3.1-70b-versatile"
+    GROQ_MODEL = "llama-3.3-70b-versatile"
     LOG_LEVEL = "INFO"
     PRIVATE_MODE = True  # Avoid storing sensitive logs by default
 

@@ -89,6 +89,31 @@ class TestWindowContext(unittest.TestCase):
         lines = text.splitlines()
         self.assertEqual(len(lines), 2)
 
+    def test_list_open_windows(self):
+        mock_win32gui = window_context.win32gui
+        mock_win32process = window_context.win32process
+
+        # Configure EnumWindows to call the callback immediately with some mock hwnds
+        def side_effect(callback, ctx):
+            callback(100, ctx)
+            callback(200, ctx)
+
+        mock_win32gui.EnumWindows.side_effect = side_effect
+
+        # Configure helper functions
+        # Window 1: Visible, has title, has process
+        mock_win32gui.IsWindowVisible.side_effect = lambda h: True
+        mock_win32gui.GetWindowText.side_effect = lambda h: "Win 1" if h == 100 else "Win 2"
+        mock_win32process.GetWindowThreadProcessId.return_value = (0, 999)
+
+        # Test
+        windows = window_context.list_open_windows()
+
+        self.assertEqual(len(windows), 2)
+        self.assertEqual(windows[0]['hwnd'], 100)
+        self.assertEqual(windows[0]['title'], "Win 1")
+        self.assertEqual(windows[1]['hwnd'], 200)
+
 class TestTextCleaner(unittest.TestCase):
     def test_build_context(self):
         window_info = {
