@@ -3,3 +3,5 @@ pywinauto
 psutil
 groq
 colorama
+python-dotenv
+Pillow

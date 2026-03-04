@@ -2,12 +2,15 @@ import os
 import time
 import logging
 from groq import Groq, APIConnectionError, RateLimitError, APIStatusError
+from dotenv import load_dotenv
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
 class GroqClient:
     def __init__(self):
+        # Load environment variables from .env file
+        load_dotenv()
         self.api_key = os.environ.get("GROQ_API_KEY")
         if not self.api_key:
             logger.warning("GROQ_API_KEY not found in environment variables.")
