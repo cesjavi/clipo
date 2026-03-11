@@ -5,3 +5,5 @@ groq
 colorama
 python-dotenv
 Pillow
+faster-whisper
+sounddevice

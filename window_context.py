@@ -9,11 +9,13 @@ try:
     import win32gui
     import win32process
     from pywinauto import Application
+    from pywinauto.keyboard import send_keys
 except ImportError:
     logger.warning("Windows libraries not found. This module will not function correctly without mocks.")
     win32gui = None
     win32process = None
     Application = None
+    send_keys = None
 
 
 def get_active_window_info():
@@ -199,3 +201,61 @@ def extract_text_uia(hwnd):
         return ""
 
     return "\n".join(extracted_texts)
+
+
+def send_command_to_window(hwnd, command, press_enter=True):
+    """
+    Focuses a window and sends text input to it.
+    Args:
+        hwnd (int): Window handle.
+        command (str): Text to send.
+        press_enter (bool): Whether to press Enter after the text.
+    Returns:
+        str: The command sent.
+    """
+    if not hwnd:
+        raise ValueError("A valid window handle is required.")
+    if not Application or not send_keys:
+        raise RuntimeError("pywinauto is not available.")
+
+    normalized_command = (command or "").strip()
+    if not normalized_command:
+        raise ValueError("Command cannot be empty.")
+
+    focus_window(hwnd)
+    send_text_to_window(normalized_command)
+    if press_enter:
+        send_keys_to_window("{ENTER}")
+
+    return normalized_command
+
+
+def focus_window(hwnd):
+    if not hwnd:
+        raise ValueError("A valid window handle is required.")
+    if not Application:
+        raise RuntimeError("pywinauto is not available.")
+
+    app = Application(backend="uia").connect(handle=hwnd, timeout=5)
+    window = app.window(handle=hwnd)
+    window.set_focus()
+    return window
+
+
+def send_keys_to_window(keys):
+    if not send_keys:
+        raise RuntimeError("pywinauto is not available.")
+    if not keys:
+        raise ValueError("Keys cannot be empty.")
+    send_keys(keys, pause=0.01)
+    return keys
+
+
+def send_text_to_window(text):
+    if not send_keys:
+        raise RuntimeError("pywinauto is not available.")
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        raise ValueError("Text cannot be empty.")
+    send_keys(normalized_text, with_spaces=True, pause=0.01)
+    return normalized_text

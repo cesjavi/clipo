@@ -4,6 +4,7 @@ import threading
 import logging
 import queue
 import os
+import time
 import psutil
 from PIL import Image, ImageTk
 
@@ -18,9 +19,18 @@ except ImportError:
     win32gui = None
 
 from config import config
-from window_context import list_open_windows, extract_text_uia, get_active_window_info
+from window_context import (
+    list_open_windows,
+    extract_text_uia,
+    get_active_window_info,
+    send_command_to_window,
+    send_keys_to_window,
+    send_text_to_window,
+)
 from text_cleaner import build_context
 from groq_client import groq_client
+from voice_input import recognize_once
+from automation_commands import parse_command, execute_parsed_command, looks_like_automation_command
 
 # Configure logging
 logging.basicConfig(level=config.LOG_LEVEL)
@@ -63,6 +73,8 @@ class WinAutomationApp:
         self.windows_map = {}  # hwnd -> window_info_dict
         self.context_text = ""
         self.icon_cache = {} # path -> PhotoImage
+        self.is_listening = False
+        self.window_frames = {}
 
         # Drag state for floating icon
         self._drag_start_x = 0
@@ -177,6 +189,46 @@ class WinAutomationApp:
         ttk.Button(cmd_frame, text="✨ Señalar", style="Command.TButton", command=self.cmd_highlight).pack(fill=tk.X, pady=2)
         # Type Keys
         ttk.Button(cmd_frame, text="⌨️ Escribir texto...", style="Command.TButton", command=self.cmd_type_dialog).pack(fill=tk.X, pady=2)
+        self.entry_command = tk.Entry(
+            cmd_frame,
+            font=FONT_MAIN,
+            bg=BG_ITEM,
+            fg=FG_TEXT,
+            insertbackground="white",
+            relief=tk.FLAT,
+            bd=8
+        )
+        self.entry_command.pack(fill=tk.X, pady=(8, 4))
+        self.entry_command.bind("<Return>", lambda event: self.cmd_send_command())
+        self.btn_voice_command = ttk.Button(
+            cmd_frame,
+            text="Dictar comando",
+            style="Command.TButton",
+            command=lambda: self.start_voice_capture("command")
+        )
+        self.btn_voice_command.pack(fill=tk.X, pady=2)
+        self.btn_voice_execute = ttk.Button(
+            cmd_frame,
+            text="Dictar y ejecutar",
+            style="Command.TButton",
+            command=lambda: self.start_voice_capture("command_execute")
+        )
+        self.btn_voice_execute.pack(fill=tk.X, pady=2)
+        ttk.Button(
+            cmd_frame,
+            text="Enviar comando",
+            style="Command.TButton",
+            command=self.cmd_send_command
+        ).pack(fill=tk.X, pady=2)
+        tk.Label(
+            cmd_frame,
+            text="Ej: cambiar a navegador, pestaña 3, discord hola",
+            font=("Segoe UI", 8),
+            bg=BG_PANEL,
+            fg=FG_DIM,
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(6, 0))
         
         ttk.Button(sidebar_container, text="🔄 Refrescar Lista", command=self.refresh_windows, style="Action.TButton").pack(fill=tk.X, pady=(10, 0))
 
@@ -225,7 +277,22 @@ class WinAutomationApp:
             bd=10
         )
         self.entry_question.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-        self.entry_question.bind("<Return>", lambda event: self.ask_groq())
+        self.entry_question.bind("<Return>", lambda event: self.submit_input())
+
+        self.btn_voice_question = tk.Button(
+            input_container,
+            text="Mic",
+            font=("Segoe UI", 9),
+            bg=BG_ITEM,
+            fg=FG_TEXT,
+            activebackground="#10b981",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            command=lambda: self.start_voice_capture("question"),
+            cursor="hand2"
+        )
+        self.btn_voice_question.pack(side=tk.RIGHT, padx=(0, 10))
 
         self.btn_send = tk.Button(
             input_container, 
@@ -237,7 +304,7 @@ class WinAutomationApp:
             activeforeground="white",
             relief=tk.FLAT,
             padx=20,
-            command=self.ask_groq,
+            command=self.submit_input,
             cursor="hand2"
         )
         self.btn_send.pack(side=tk.RIGHT)
@@ -280,6 +347,11 @@ class WinAutomationApp:
                     self.btn_send.config(state="normal", text="Enviar")
                 elif msg_type == "automation_done":
                     self.append_chat("System", data, "system")
+                elif msg_type == "voice_result":
+                    target, text = data
+                    self.apply_voice_text(target, text)
+                elif msg_type == "voice_state":
+                    self.set_voice_state(data)
                 self.msg_queue.task_done()
         except queue.Empty:
             pass
@@ -288,6 +360,54 @@ class WinAutomationApp:
 
     def status(self, msg):
         logger.info(msg)
+
+    def set_voice_state(self, listening):
+        self.is_listening = listening
+        question_text = "Escuchando..." if listening else "Mic"
+        command_text = "Escuchando..." if listening else "Dictar comando"
+        question_state = "disabled" if listening else "normal"
+        command_state = "disabled" if listening else "normal"
+        self.btn_voice_question.config(text=question_text, state=question_state)
+        self.btn_voice_command.config(text=command_text, state=command_state)
+        self.btn_voice_execute.config(state=command_state)
+
+    def start_voice_capture(self, target):
+        if self.is_listening:
+            return
+        self.msg_queue.put(("voice_state", True))
+        self.append_chat("System", "Escuchando voz...", "system")
+        threading.Thread(target=self._voice_worker, args=(target,), daemon=True).start()
+
+    def _voice_worker(self, target):
+        try:
+            text = recognize_once(timeout_seconds=15)
+            self.msg_queue.put(("voice_result", (target, text)))
+        except Exception as e:
+            self.msg_queue.put(("error", f"Error de voz: {e}"))
+        finally:
+            self.msg_queue.put(("voice_state", False))
+
+    def apply_voice_text(self, target, text):
+        if target == "question" and looks_like_automation_command(text):
+            self.entry_command.delete(0, tk.END)
+            self.entry_command.insert(0, text)
+            self.append_chat("System", f"Voz capturada como comando: {text}", "system")
+            self.cmd_send_command()
+            return
+
+        if target == "command_execute":
+            self.entry_command.delete(0, tk.END)
+            self.entry_command.insert(0, text)
+            self.append_chat("System", f"Voz capturada: {text}", "system")
+            self.cmd_send_command()
+            return
+
+        entry = self.entry_question if target == "question" else self.entry_command
+        current_text = entry.get().strip()
+        new_text = text if not current_text else f"{current_text} {text}"
+        entry.delete(0, tk.END)
+        entry.insert(0, new_text)
+        self.append_chat("System", f"Voz capturada: {text}", "system")
 
     # --- Automation Commands Implementation ---
     def cmd_focus(self):
@@ -329,16 +449,66 @@ class WinAutomationApp:
         if text_to_type:
             threading.Thread(target=self._type_worker, args=(text_to_type,), daemon=True).start()
 
+    def cmd_send_command(self):
+        if not self.selected_window_hwnd:
+            messagebox.showwarning("Atención", "Seleccioná una ventana primero.")
+            return
+
+        command = self.entry_command.get().strip()
+        if not command:
+            messagebox.showwarning("Atención", "Ingresá un comando para enviar.")
+            return
+
+        self.entry_command.delete(0, tk.END)
+        threading.Thread(target=self._command_worker, args=(command,), daemon=True).start()
+
     def _type_worker(self, text):
         try:
             self.cmd_focus() # Ensure it's in front
-            # Use pywinauto to type
-            app = Application(backend="uia").connect(handle=self.selected_window_hwnd)
-            window = app.window(handle=self.selected_window_hwnd)
-            window.type_keys(text, with_spaces=True)
-            self.msg_queue.put(("automation_done", f"Texto enviado: '{text}'"))
+            sent_text = send_command_to_window(self.selected_window_hwnd, text, press_enter=False)
+            self.msg_queue.put(("automation_done", f"Texto enviado: '{sent_text}'"))
         except Exception as e:
             self.msg_queue.put(("error", f"Error al escribir: {e}"))
+
+    def _command_worker(self, command):
+        try:
+            window_info = self.windows_map.get(self.selected_window_hwnd)
+            if not window_info:
+                raise ValueError("La ventana seleccionada ya no está disponible.")
+
+            parsed_command = parse_command(command, window_info, list(self.windows_map.values()))
+            description = execute_parsed_command(
+                window_info,
+                parsed_command,
+                automation={
+                    "focus": self._focus_window_for_automation,
+                    "send_keys": self._send_keys_for_automation,
+                    "send_text": self._send_text_for_automation,
+                    "switch_window": self._switch_window_for_automation,
+                    "wait": self._wait_for_automation,
+                },
+            )
+            self.msg_queue.put(("automation_done", f"Comando ejecutado: {description}"))
+        except Exception as e:
+            self.msg_queue.put(("error", f"Error al enviar comando: {e}"))
+
+    def _focus_window_for_automation(self, hwnd):
+        self.cmd_focus()
+        return hwnd
+
+    def _send_keys_for_automation(self, keys):
+        return send_keys_to_window(keys)
+
+    def _send_text_for_automation(self, text):
+        return send_text_to_window(text)
+
+    def _switch_window_for_automation(self, hwnd):
+        self.select_window_by_hwnd(hwnd)
+        self.cmd_focus()
+        return hwnd
+
+    def _wait_for_automation(self, seconds):
+        time.sleep(seconds)
 
     def get_window_icon(self, hwnd):
         try:
@@ -379,6 +549,7 @@ class WinAutomationApp:
         for widget in self.frame_icons.winfo_children(): widget.destroy()
         windows = list_open_windows()
         self.windows_map = {}
+        self.window_frames = {}
         windows = sorted(windows, key=lambda x: x['title'].lower())
 
         for w in windows:
@@ -387,6 +558,7 @@ class WinAutomationApp:
             
             item_frame = tk.Frame(self.frame_icons, bg=BG_DARK, cursor="hand2")
             item_frame.pack(fill=tk.X, padx=2, pady=1)
+            self.window_frames[hwnd] = item_frame
             
             icon_img = self.get_window_icon(hwnd)
             if icon_img:
@@ -420,6 +592,28 @@ class WinAutomationApp:
         if window_info:
             self.append_chat("System", f"Seleccionaste: {window_info['title']}", "system")
             threading.Thread(target=self._capture_worker, args=(window_info,), daemon=True).start()
+
+    def select_window_by_hwnd(self, hwnd):
+        frame = self.window_frames.get(hwnd)
+        if not frame:
+            raise ValueError("No se encontró la ventana solicitada.")
+        self.on_window_selected(hwnd, frame)
+
+    def submit_input(self):
+        question = self.entry_question.get().strip()
+        if not question:
+            return
+        if not self.selected_window_hwnd:
+            messagebox.showwarning("Atención", "Seleccioná una ventana primero.")
+            return
+
+        if looks_like_automation_command(question):
+            self.entry_question.delete(0, tk.END)
+            self.append_chat("System", f"Detectado como comando: {question}", "system")
+            threading.Thread(target=self._command_worker, args=(question,), daemon=True).start()
+            return
+
+        self.ask_groq()
 
     def _capture_worker(self, window_info):
         try:
