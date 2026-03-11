@@ -82,6 +82,7 @@ class WinAutomationApp:
 
         # Assistant panel
         self.panel = None
+        self.icon_menu = None
 
         # --- Threading ---
         self.msg_queue = queue.Queue()
@@ -124,8 +125,8 @@ class WinAutomationApp:
     def create_floating_widget(self):
         self.icon_btn = tk.Button(
             self.root,
-            text="🤖",
-            font=("Segoe UI Emoji", 24),
+            text="Cl",
+            font=("Segoe UI Semibold", 20),
             bg=ACCENT,
             fg="white",
             activebackground="#2563eb",
@@ -140,6 +141,13 @@ class WinAutomationApp:
         # Drag the floating assistant icon
         self.icon_btn.bind("<ButtonPress-1>", self._start_drag)
         self.icon_btn.bind("<B1-Motion>", self._do_drag)
+        self.icon_btn.bind("<Button-3>", self.show_icon_menu)
+
+        self.icon_menu = tk.Menu(self.root, tearoff=0)
+        self.icon_menu.add_command(label="Mostrar panel", command=self.show_panel)
+        self.icon_menu.add_command(label="Ocultar panel", command=self.hide_panel)
+        self.icon_menu.add_separator()
+        self.icon_menu.add_command(label="Salir", command=self.exit_app)
 
     def create_panel_window(self):
         self.panel = tk.Toplevel(self.root)
@@ -157,27 +165,67 @@ class WinAutomationApp:
         sidebar = tk.Frame(self.paned, bg=BG_PANEL, width=250)
         self.paned.add(sidebar, width=300)
 
-        sidebar_container = ttk.Frame(sidebar, style="Panel.TFrame", padding=10)
-        sidebar_container.pack(fill=tk.BOTH, expand=True)
+        sidebar_canvas_container = tk.Frame(sidebar, bg=BG_PANEL)
+        sidebar_canvas_container.pack(fill=tk.BOTH, expand=True)
+
+        self.sidebar_canvas = tk.Canvas(
+            sidebar_canvas_container,
+            bg=BG_PANEL,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.sidebar_canvas.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+
+        self.sidebar_scrollbar = ttk.Scrollbar(
+            sidebar_canvas_container,
+            orient=tk.VERTICAL,
+            command=self.sidebar_canvas.yview,
+        )
+        self.sidebar_scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
+        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
+
+        sidebar_container = ttk.Frame(self.sidebar_canvas, style="Panel.TFrame", padding=10)
+        self.sidebar_window_id = self.sidebar_canvas.create_window((0, 0), window=sidebar_container, anchor="nw")
+        sidebar_container.bind("<Configure>", self._on_sidebar_configure)
+        self.sidebar_canvas.bind("<Configure>", self._on_sidebar_canvas_configure)
+        self._bind_mousewheel(self.sidebar_canvas)
+        self._bind_mousewheel(sidebar_container)
 
         tk.Label(sidebar_container, text="Ventanas", font=FONT_BOLD, bg=BG_PANEL, fg=FG_TEXT).pack(anchor="w", pady=(0, 5))
-        
-        # Window Selection Scroll Area (Vertical for sidebar)
-        canvas_container = tk.Frame(sidebar_container, bg=BG_DARK, bd=1, relief=tk.FLAT)
-        canvas_container.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas_windows = tk.Canvas(canvas_container, bg=BG_DARK, highlightthickness=0)
+        windows_container = tk.Frame(sidebar_container, bg=BG_DARK, bd=1, relief=tk.FLAT, height=360)
+        windows_container.pack(fill=tk.X, expand=False)
+        windows_container.pack_propagate(False)
+
+        self.canvas_windows = tk.Canvas(
+            windows_container,
+            bg=BG_DARK,
+            highlightthickness=0,
+            bd=0,
+        )
         self.canvas_windows.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
-        self.scrollbar_v = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=self.canvas_windows.yview)
+        self.scrollbar_v = tk.Scrollbar(
+            windows_container,
+            orient=tk.VERTICAL,
+            command=self.canvas_windows.yview,
+            width=14,
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0,
+            troughcolor=BG_PANEL,
+            activebackground=ACCENT,
+            bg=BG_ITEM,
+        )
         self.scrollbar_v.pack(fill=tk.Y, side=tk.RIGHT)
-
         self.canvas_windows.configure(yscrollcommand=self.scrollbar_v.set)
-        
+
         self.frame_icons = tk.Frame(self.canvas_windows, bg=BG_DARK)
-        self.canvas_windows.create_window((0, 0), window=self.frame_icons, anchor="nw")
-        
-        self.frame_icons.bind("<Configure>", lambda e: self.canvas_windows.configure(scrollregion=self.canvas_windows.bbox("all")))
+        self.canvas_windows_window_id = self.canvas_windows.create_window((0, 0), window=self.frame_icons, anchor="nw")
+        self.frame_icons.bind("<Configure>", self._on_windows_configure)
+        self.canvas_windows.bind("<Configure>", self._on_windows_canvas_configure)
+        self._bind_windows_mousewheel(self.canvas_windows)
+        self._bind_windows_mousewheel(self.frame_icons)
 
         # --- Automation Commands Section ---
         cmd_frame = ttk.LabelFrame(sidebar_container, text="Comandos", style="Panel.TLabelframe", padding=8)
@@ -309,20 +357,59 @@ class WinAutomationApp:
         )
         self.btn_send.pack(side=tk.RIGHT)
 
+    def _bind_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+
+    def _bind_windows_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_windows_mousewheel, add="+")
+
+    def _on_sidebar_configure(self, _event):
+        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+
+    def _on_sidebar_canvas_configure(self, event):
+        self.sidebar_canvas.itemconfigure(self.sidebar_window_id, width=event.width)
+
+    def _on_windows_configure(self, _event):
+        self.canvas_windows.configure(scrollregion=self.canvas_windows.bbox("all"))
+        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+
+    def _on_windows_canvas_configure(self, event):
+        self.canvas_windows.itemconfigure(self.canvas_windows_window_id, width=event.width)
+
     def _on_mousewheel(self, event):
-        self.canvas_windows.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_windows_mousewheel(self, event):
+        self.canvas_windows.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
 
     def toggle_panel(self):
         if self.panel.state() == "withdrawn":
-            self.panel.deiconify()
-            self.panel.attributes("-topmost", True)
-            self.panel.attributes("-topmost", False)
-            self.refresh_windows()
+            self.show_panel()
         else:
             self.hide_panel()
 
+    def show_panel(self):
+        self.panel.deiconify()
+        self.panel.attributes("-topmost", True)
+        self.panel.attributes("-topmost", False)
+        self.refresh_windows()
+
     def hide_panel(self):
         self.panel.withdraw()
+
+    def show_icon_menu(self, event):
+        try:
+            self.icon_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.icon_menu.grab_release()
+
+    def exit_app(self):
+        try:
+            if self.panel is not None and self.panel.winfo_exists():
+                self.panel.destroy()
+        finally:
+            self.root.destroy()
 
     def _start_drag(self, event):
         self._drag_start_x = event.x
@@ -380,7 +467,7 @@ class WinAutomationApp:
 
     def _voice_worker(self, target):
         try:
-            text = recognize_once(timeout_seconds=15)
+            text = recognize_once(timeout_seconds=8)
             self.msg_queue.put(("voice_result", (target, text)))
         except Exception as e:
             self.msg_queue.put(("error", f"Error de voz: {e}"))
@@ -559,6 +646,7 @@ class WinAutomationApp:
             item_frame = tk.Frame(self.frame_icons, bg=BG_DARK, cursor="hand2")
             item_frame.pack(fill=tk.X, padx=2, pady=1)
             self.window_frames[hwnd] = item_frame
+            self._bind_windows_mousewheel(item_frame)
             
             icon_img = self.get_window_icon(hwnd)
             if icon_img:
@@ -566,11 +654,13 @@ class WinAutomationApp:
             else:
                 lbl_icon = tk.Label(item_frame, text="📄", font=("Segoe UI Emoji", 12), bg=BG_DARK, fg=FG_TEXT)
             lbl_icon.pack(side=tk.LEFT, padx=5)
+            self._bind_windows_mousewheel(lbl_icon)
             
             title = w['title']
             if len(title) > 30: title = title[:27] + "..."
             lbl_title = tk.Label(item_frame, text=title, font=("Segoe UI", 9), bg=BG_DARK, fg=FG_TEXT, anchor="w")
             lbl_title.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self._bind_windows_mousewheel(lbl_title)
 
             def select_handler(h=hwnd, f=item_frame): self.on_window_selected(h, f)
             for child in (item_frame, lbl_icon, lbl_title):
@@ -578,6 +668,7 @@ class WinAutomationApp:
 
         self.frame_icons.update_idletasks()
         self.canvas_windows.configure(scrollregion=self.canvas_windows.bbox("all"))
+        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
 
     def on_window_selected(self, hwnd, frame):
         for f in self.frame_icons.winfo_children():
@@ -661,4 +752,11 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.configure(bg=BG_DARK)
     app = WinAutomationApp(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        logger.info("Clipo cerrado desde la consola.")
+        try:
+            app.exit_app()
+        except tk.TclError:
+            pass

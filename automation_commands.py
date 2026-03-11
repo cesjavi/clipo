@@ -29,6 +29,14 @@ MEDIA_APPS = {
     "spotify.exe": "Spotify",
 }
 
+SHELL_PROCESSES = {
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "windowsterminal.exe",
+    "wt.exe",
+}
+
 SEARCH_SHORTCUTS = {
     "teams.exe": "^e",
     "ms-teams.exe": "^e",
@@ -53,6 +61,13 @@ APP_ALIASES = {
 }
 
 AUTOMATION_PREFIXES = (
+    "clipo",
+    "quiero",
+    "necesito",
+    "podrias",
+    "podrias por favor",
+    "podes",
+    "por favor",
     "cambiar",
     "ir a",
     "abrir",
@@ -68,6 +83,12 @@ AUTOMATION_PREFIXES = (
     "manda al chat",
     "chat ",
     "buscar chat",
+    "escribe",
+    "escribir",
+    "tipea",
+    "tipear",
+    "presiona",
+    "apreta",
     "youtube",
     "play",
     "pause",
@@ -89,6 +110,27 @@ def normalize_command(command):
     return re.sub(r"\s+", " ", (command or "").strip())
 
 
+def strip_conversational_prefix(command):
+    text = normalize_command(command)
+    patterns = (
+        r"^(?:clipo(?:\s+hacer|\s+hace)?\s+)",
+        r"^(?:quiero(?:\s+que)?\s+)",
+        r"^(?:necesito(?:\s+que)?\s+)",
+        r"^(?:podrias(?:\s+por\s+favor)?\s+)",
+        r"^(?:podes\s+)",
+        r"^(?:por\s+favor\s+)",
+    )
+    changed = True
+    while changed and text:
+        changed = False
+        for pattern in patterns:
+            updated = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+            if updated != text:
+                text = updated
+                changed = True
+    return normalize_command(text)
+
+
 def fold_text(value):
     text = unicodedata.normalize("NFKD", value or "")
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -99,6 +141,8 @@ def detect_window_kind(window_info):
     process_name = fold_text(window_info.get("process_name") or "")
     title = fold_text(window_info.get("title") or "")
 
+    if process_name in SHELL_PROCESSES or "powershell" in title or "cmd.exe" in title:
+        return "shell"
     if "youtube" in title and process_name in BROWSER_PROCESSES:
         return "youtube"
     if process_name in MEDIA_APPS or "spotify" in title:
@@ -113,7 +157,7 @@ def detect_window_kind(window_info):
 
 
 def parse_command(command, window_info, available_windows=None):
-    normalized = normalize_command(command)
+    normalized = strip_conversational_prefix(command)
     lowered = fold_text(normalized)
     available_windows = available_windows or []
     kind = detect_window_kind(window_info)
@@ -126,6 +170,15 @@ def parse_command(command, window_info, available_windows=None):
     direct_message = _parse_direct_message_command(normalized, lowered, process_name)
     if direct_message:
         return direct_message
+
+    write_action = _parse_write_text_command(normalized, lowered)
+    if write_action:
+        return write_action
+
+    if kind == "shell":
+        shell_action = _parse_shell_command(normalized, lowered)
+        if shell_action:
+            return shell_action
 
     chat_write_action = _parse_chat_write_command(normalized, lowered, process_name)
     if chat_write_action:
@@ -162,7 +215,7 @@ def parse_command(command, window_info, available_windows=None):
 
 
 def looks_like_automation_command(command):
-    lowered = fold_text(normalize_command(command))
+    lowered = fold_text(strip_conversational_prefix(command))
     return any(lowered.startswith(prefix) for prefix in AUTOMATION_PREFIXES)
 
 
@@ -253,6 +306,117 @@ def _parse_chat_write_command(normalized, lowered, process_name):
                 "press_enter": True,
                 "description": f"Mensaje: {message}",
             }
+
+    return None
+
+
+def _parse_write_text_command(normalized, lowered):
+    quoted_match = re.match(
+        r"^(?:escribir|escribe|tipear|tipea)\s+[\"'“”]?(.+?)[\"'“”]?\s*(?:y\s+)?(?:apreta|presiona)(?:\s+la\s+tecla\s+|\s+tecla\s+|\s+)?enter$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if quoted_match:
+        text = _clean_spoken_message(quoted_match.group(1).strip())
+        return {
+            "type": "text",
+            "text": text,
+            "press_enter": True,
+            "description": f"Escribir texto y apretar Enter: {text}",
+        }
+
+    no_enter_match = re.match(
+        r"^(?:escribir|escribe|tipear|tipea)\s+[\"'“”]?(.+?)[\"'“”]?$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if no_enter_match:
+        text = _clean_spoken_message(no_enter_match.group(1).strip())
+        lowered_text = fold_text(text)
+        if lowered_text not in {"enter", "intro"}:
+            return {
+                "type": "text",
+                "text": text,
+                "press_enter": False,
+                "description": f"Escribir texto: {text}",
+            }
+
+    key_match = re.match(
+        r"^(?:apreta|presiona)(?:\s+la\s+tecla\s+|\s+tecla\s+|\s+)?(enter|intro)$",
+        lowered,
+    )
+    if key_match:
+        return {
+            "type": "shortcut",
+            "keys": "{ENTER}",
+            "description": "Apretar Enter",
+        }
+
+    return None
+
+
+def _parse_shell_command(normalized, lowered):
+    cleaned = lowered.strip(" .,:;!?")
+
+    list_files_commands = {
+        "listar archivos",
+        "listar los archivos",
+        "listar los archivos que hay",
+        "lista los archivos",
+        "lista los archivos que hay",
+        "mostrar archivos",
+        "mostrar los archivos",
+        "mostrar los archivos que hay",
+        "mostra los archivos",
+        "mostra los archivos que hay",
+        "ver archivos",
+        "ver los archivos",
+        "ver los archivos que hay",
+    }
+    if cleaned in list_files_commands:
+        return {
+            "type": "text",
+            "text": "dir",
+            "press_enter": True,
+            "description": "Listar archivos del directorio actual",
+        }
+
+    if cleaned in {"mostrar carpeta actual", "mostrar directorio actual", "ver carpeta actual", "ver directorio actual"}:
+        return {
+            "type": "text",
+            "text": "cd",
+            "press_enter": True,
+            "description": "Mostrar directorio actual",
+        }
+
+    mkdir_match = re.match(
+        r"^(?:crear|crea|criar|hace|hacer)\s+(?:un\s+|una\s+)?(?:directorio|carpeta|folder)(?:\s+llamad[oa])?\s+(.+)$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if mkdir_match:
+        directory_name = mkdir_match.group(1).strip().strip('"').strip(".")
+        if directory_name:
+            return {
+                "type": "text",
+                "text": f'mkdir "{directory_name}"',
+                "press_enter": True,
+                "description": f"Crear directorio {directory_name}",
+            }
+
+    match = re.match(
+        r"^(?:cambiar|ir)(?:\s+a)?\s+(?:la\s+carpeta|al\s+directorio|al\s+folder|a\s+la\s+ruta)\s+(.+)$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if match:
+        target = match.group(1).strip().strip('"')
+        return {
+            "type": "text",
+            "text": f'cd /d "{target}"',
+            "press_enter": True,
+            "description": f"Cambiar al directorio {target}",
+        }
 
     return None
 
