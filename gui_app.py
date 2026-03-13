@@ -581,7 +581,10 @@ class WinAutomationApp:
         print(f"  [DEBUG] Clipo analizando (target={target}): '{lowered}'")
         
         # Check for wake word / trigger command
-        if "computadora" in lowered and ("escuchar" in lowered or "escucha" in lowered):
+        is_computadora = "computadora" in lowered
+        is_escuchar = any(x in lowered for x in ["escuchar", "escucha", "escuchada", "escuchando"])
+        
+        if is_computadora and is_escuchar:
             if not self.continuous_listening:
                 self.continuous_listening = True
                 self.append_chat("System", "📢 MODO CONTINUO ACTIVADO. Decí 'Computadora' seguido de tu orden.", "system")

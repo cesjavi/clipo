@@ -66,6 +66,22 @@ class GroqClient:
 
         return "Error: Failed to get response from Groq after retries."
 
+    def transcribe_audio(self, file_path, model="whisper-large-v3"):
+        """
+        Transcribes audio file using Groq's Audio API.
+        """
+        if not self.client:
+            raise RuntimeError("Groq client not initialized.")
+            
+        with open(file_path, "rb") as file:
+            transcription = self.client.audio.transcriptions.create(
+                file=(os.path.basename(file_path), file.read()),
+                model=model,
+                language="es",
+                response_format="text",
+            )
+        return transcription
+
 # Singleton instance
 groq_client = GroqClient()
 

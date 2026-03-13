@@ -3,6 +3,8 @@ import os
 import sys
 import tempfile
 import wave
+from config import config
+from groq_client import groq_client
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +159,18 @@ def recognize_once(timeout_seconds=10):
     temp_path = _save_temp_wav(audio)
 
     try:
-        model = _get_model()
-        segments, _info = model.transcribe(
-            temp_path,
-            language="es",
-            vad_filter=True,
-            beam_size=5,
-        )
-        text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        if config.TRANSCRIPTION_PROVIDER == "groq":
+            text = groq_client.transcribe_audio(temp_path, model=config.GROQ_STT_MODEL)
+        else:
+            model = _get_model()
+            segments, _info = model.transcribe(
+                temp_path,
+                language="es",
+                vad_filter=True,
+                beam_size=5,
+            )
+            text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        
         text = _strip_wake_phrase(text)
         if not text:
             raise RuntimeError("No speech was recognized.")
