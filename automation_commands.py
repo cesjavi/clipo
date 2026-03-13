@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from memory_manager import memory_manager
 
 
 BROWSER_PROCESSES = {
@@ -60,6 +61,32 @@ APP_ALIASES = {
     "youtube": "youtube",
 }
 
+KEY_MAPPINGS = {
+    "enter": "{ENTER}",
+    "intro": "{ENTER}",
+    "tab": "{TAB}",
+    "tabulador": "{TAB}",
+    "esc": "{ESC}",
+    "escape": "{ESC}",
+    "espacio": "{SPACE}",
+    "borrar": "{BACKSPACE}",
+    "backspace": "{BACKSPACE}",
+    "suprimir": "{DELETE}",
+    "delete": "{DELETE}",
+    "inicio": "{HOME}",
+    "fin": "{END}",
+    "insert": "{INSERT}",
+    "f1": "{F1}", "f2": "{F2}", "f3": "{F3}", "f4": "{F4}", "f5": "{F5}",
+    "f6": "{F6}", "f7": "{F7}", "f8": "{F8}", "f9": "{F9}", "f10": "{F10}",
+    "f11": "{F11}", "f12": "{F12}",
+    "arriba": "{UP}",
+    "abajo": "{DOWN}",
+    "izquierda": "{LEFT}",
+    "derecha": "{RIGHT}",
+    "re pag": "{PGUP}",
+    "av pag": "{PGDN}",
+}
+
 AUTOMATION_PREFIXES = (
     "clipo",
     "quiero",
@@ -92,6 +119,16 @@ AUTOMATION_PREFIXES = (
     "youtube",
     "play",
     "pause",
+    "reproducir",
+    "reproduce",
+    "parar",
+    "detener",
+    "poner",
+    "pone",
+    "dar play",
+    "darle play",
+    "activar",
+    "ejecutar",
     "mute",
     "silenciar",
     "mutear",
@@ -103,6 +140,18 @@ AUTOMATION_PREFIXES = (
     "proximo tema",
     "cancion anterior",
     "tema anterior",
+    "haga",
+    "haz",
+    "enfocar",
+    "enfoca",
+    "enfoga",
+    "enfogar",
+    "focalizar",
+    "poner",
+    "pone",
+    "seleccionar ventana",
+    "buscar",
+    "busca",
 )
 
 
@@ -138,6 +187,8 @@ def fold_text(value):
 
 
 def detect_window_kind(window_info):
+    if not window_info:
+        return "generic"
     process_name = fold_text(window_info.get("process_name") or "")
     title = fold_text(window_info.get("title") or "")
 
@@ -161,7 +212,7 @@ def parse_command(command, window_info, available_windows=None):
     lowered = fold_text(normalized)
     available_windows = available_windows or []
     kind = detect_window_kind(window_info)
-    process_name = fold_text(window_info.get("process_name") or "")
+    process_name = fold_text(window_info.get("process_name") or "") if window_info else ""
 
     switch_action = _parse_switch_command(normalized, lowered, available_windows)
     if switch_action:
@@ -215,14 +266,17 @@ def parse_command(command, window_info, available_windows=None):
 
 
 def looks_like_automation_command(command):
-    lowered = fold_text(strip_conversational_prefix(command))
+    text = strip_conversational_prefix(command)
+    # Strip leading punctuation/symbols like ¡ or ¿
+    text = re.sub(r'^[^a-zA-Z0-9]+', '', text)
+    lowered = fold_text(text)
     return any(lowered.startswith(prefix) for prefix in AUTOMATION_PREFIXES)
 
 
 def _parse_switch_command(normalized, lowered, available_windows):
     patterns = (
-        r"^(?:cambiar|ir)(?:\s+a| al)?\s+(.+)$",
-        r"^(?:abrir|seleccionar)\s+(.+)$",
+        r"^(?:cambiar|ir)(?:\s+a| al)?(?:\s+la\s+ventana|la\s+app|el\s+programa)?\s+(.+)$",
+        r"^(?:abrir|seleccionar|enfocar|enfoca|enfogar|enfoga|poner|pone)(?:\s+la\s+ventana|la\s+app|el\s+programa)?\s+(.+)$",
     )
     target = None
     for pattern in patterns:
@@ -244,6 +298,16 @@ def _parse_switch_command(normalized, lowered, available_windows):
             "type": "switch_window",
             "target_hwnd": resolved["hwnd"],
             "description": f"Cambiar a {resolved['title']}",
+        }
+    
+    # If the user used a clear switch verb but we didn't find the window,
+    # let's return a special error or description so we don't fall back to "writing text".
+    if re.match(r"^(?:abrir|seleccionar|enfocar|enfoca|enfogar|enfoga|poner|pone)", lowered):
+         return {
+            "type": "switch_window", # We use switch_window type to bypass the "need window" error
+            "target_hwnd": None, 
+            "description": f"No se encontró ninguna ventana que coincida con '{target}'",
+            "error": True
         }
     return None
 
@@ -342,15 +406,17 @@ def _parse_write_text_command(normalized, lowered):
             }
 
     key_match = re.match(
-        r"^(?:apreta|presiona)(?:\s+la\s+tecla\s+|\s+tecla\s+|\s+)?(enter|intro)$",
+        r"^(?:apreta|presiona|apretar|presionar|precionar|abretar|cliquea|pulsionar)(?:\s+la)?(?:\s+tecla)?\s+(.+)$",
         lowered,
     )
     if key_match:
-        return {
-            "type": "shortcut",
-            "keys": "{ENTER}",
-            "description": "Apretar Enter",
-        }
+        target_key = key_match.group(1).strip(" .,:;!?")
+        if target_key in KEY_MAPPINGS:
+            return {
+                "type": "shortcut",
+                "keys": KEY_MAPPINGS[target_key],
+                "description": f"Apretar tecla {target_key}",
+            }
 
     return None
 
@@ -451,7 +517,7 @@ def _parse_named_target_command(normalized, lowered, kind, process_name):
                 "description": f"Buscar chat {name}",
             }
 
-    chat_match = re.match(r"^(?:chat|abrir chat|buscar chat)\s+(.+)$", lowered)
+    chat_match = re.match(r"^(?:chat|abrir chat|buscar chat|seleccionar chat|buscar|busca)\s+(.+)$", lowered)
     if chat_match and process_name in SEARCH_SHORTCUTS:
         return {
             "type": "search_target",
@@ -510,6 +576,17 @@ def _parse_youtube_command(lowered):
         "youtube play pause": {"type": "shortcut", "keys": "k", "description": "YouTube play/pause"},
         "play": {"type": "shortcut", "keys": "k", "description": "YouTube play"},
         "pause": {"type": "shortcut", "keys": "k", "description": "YouTube pause"},
+        "reproducir": {"type": "shortcut", "keys": "k", "description": "YouTube reproducir"},
+        "reproduce": {"type": "shortcut", "keys": "k", "description": "YouTube reproducir"},
+        "parar": {"type": "shortcut", "keys": "k", "description": "YouTube pausar"},
+        "detener": {"type": "shortcut", "keys": "k", "description": "YouTube pausar"},
+        "pausar": {"type": "shortcut", "keys": "k", "description": "YouTube pausar"},
+        "poner": {"type": "shortcut", "keys": "k", "description": "YouTube reproducir"},
+        "pone": {"type": "shortcut", "keys": "k", "description": "YouTube reproducir"},
+        "dar play": {"type": "shortcut", "keys": "k", "description": "YouTube play"},
+        "darle play": {"type": "shortcut", "keys": "k", "description": "YouTube play"},
+        "activar": {"type": "shortcut", "keys": "k", "description": "YouTube play"},
+        "ejecutar": {"type": "shortcut", "keys": "k", "description": "YouTube play"},
         "youtube mute": {"type": "shortcut", "keys": "m", "description": "YouTube mute"},
         "mute": {"type": "shortcut", "keys": "m", "description": "YouTube mute"},
         "youtube fullscreen": {"type": "shortcut", "keys": "f", "description": "YouTube fullscreen"},
@@ -613,15 +690,34 @@ def _clean_spoken_message(message):
 
 
 def resolve_window_target(target, available_windows):
-    folded_target = fold_text(target)
+    folded_target = fold_text(target).strip(" .,:;!?")
+    
+    # 0. Try learned aliases from memory first
+    learned_aliases = memory_manager.memory.get("aliases", {})
+    if folded_target in learned_aliases:
+        found = _find_window_by_alias(learned_aliases[folded_target], available_windows)
+        if found:
+            return found
+
+    # 1. Try hardcoded aliases
     for alias, resolved in APP_ALIASES.items():
         if folded_target == alias:
-            return _find_window_by_alias(resolved, available_windows)
+            found = _find_window_by_alias(resolved, available_windows)
+            if found:
+                return found
 
+    # 2. Try partial title match (case-insensitive via fold_text)
     for window in available_windows:
         title = fold_text(window.get("title") or "")
-        if folded_target and folded_target in title:
+        if folded_target and (folded_target in title or title in folded_target):
             return window
+            
+    # 3. Try partial process name match
+    for window in available_windows:
+        process_name = fold_text(window.get("process_name") or "")
+        if folded_target and (folded_target in process_name or process_name in folded_target):
+            return window
+
     return None
 
 
@@ -648,6 +744,9 @@ def _find_window_by_alias(alias, available_windows):
 
 def execute_parsed_command(window_info, parsed_command, automation):
     if parsed_command["type"] == "switch_window":
+        if parsed_command.get("error"):
+            # If it's a failed resolution, we don't switch, just return the description
+            return parsed_command["description"]
         automation["switch_window"](parsed_command["target_hwnd"])
         return parsed_command["description"]
 

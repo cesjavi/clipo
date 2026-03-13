@@ -67,3 +67,15 @@ def build_context(window_info, raw_text, max_chars=4000):
             full_text = truncated + "..."
 
     return full_text
+
+def build_all_windows_summary(windows):
+    """
+    Creates a summary of all open windows.
+    """
+    if not windows:
+        return "No open windows detected."
+    
+    summary = "LISTA DE VENTANAS ABIERTAS:\n"
+    for i, w in enumerate(windows, 1):
+        summary += f"{i}. Título: {w.get('title', 'Unknown')} | Proceso: {w.get('process_name', 'Unknown')} | HWND: {w.get('hwnd')}\n"
+    return summary

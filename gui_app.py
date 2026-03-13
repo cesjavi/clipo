@@ -1,4 +1,5 @@
 import tkinter as tk
+import re
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import logging
@@ -27,7 +28,8 @@ from window_context import (
     send_keys_to_window,
     send_text_to_window,
 )
-from text_cleaner import build_context
+from text_cleaner import build_context, build_all_windows_summary
+from memory_manager import memory_manager
 from groq_client import groq_client
 from voice_input import recognize_once
 from automation_commands import parse_command, execute_parsed_command, looks_like_automation_command
@@ -75,6 +77,9 @@ class WinAutomationApp:
         self.icon_cache = {} # path -> PhotoImage
         self.is_listening = False
         self.window_frames = {}
+        self._click_id = None
+        self._drag_moved = False
+        self._ignore_next_release = False
 
         # Drag state for floating icon
         self._drag_start_x = 0
@@ -133,13 +138,14 @@ class WinAutomationApp:
             activeforeground="white",
             relief=tk.FLAT,
             bd=0,
-            command=self.toggle_panel,
             cursor="hand2",
         )
         self.icon_btn.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # Drag the floating assistant icon
+        # Unified logic for drag, single click and double click
         self.icon_btn.bind("<ButtonPress-1>", self._start_drag)
+        self.icon_btn.bind("<ButtonRelease-1>", self._on_icon_release)
+        self.icon_btn.bind("<Double-Button-1>", self._on_icon_double)
         self.icon_btn.bind("<B1-Motion>", self._do_drag)
         self.icon_btn.bind("<Button-3>", self.show_icon_menu)
 
@@ -414,11 +420,36 @@ class WinAutomationApp:
     def _start_drag(self, event):
         self._drag_start_x = event.x
         self._drag_start_y = event.y
+        self._drag_moved = False
 
     def _do_drag(self, event):
+        if abs(event.x - self._drag_start_x) > 5 or abs(event.y - self._drag_start_y) > 5:
+            self._drag_moved = True
         x = self.root.winfo_x() + (event.x - self._drag_start_x)
         y = self.root.winfo_y() + (event.y - self._drag_start_y)
         self.root.geometry(f"+{x}+{y}")
+
+    def _on_icon_release(self, event):
+        if self._drag_moved:
+            return
+        if self._ignore_next_release:
+            self._ignore_next_release = False
+            return
+        
+        # Single click logic with delay to allow for double click
+        if self._click_id is None:
+            self._click_id = self.root.after(300, self._handle_single_click)
+
+    def _on_icon_double(self, event):
+        if self._click_id:
+            self.root.after_cancel(self._click_id)
+            self._click_id = None
+        self._ignore_next_release = True
+        self.show_panel()
+
+    def _handle_single_click(self):
+        self._click_id = None
+        self.start_voice_capture("command_execute")
 
     def process_queue(self):
         try:
@@ -427,7 +458,35 @@ class WinAutomationApp:
                 if msg_type == "context_ready":
                     self.context_text = data
                 elif msg_type == "response_ready":
-                    self.append_chat("Clipo", data, "bot")
+                    response = data
+                    # Check for FOCUS: [HWND]
+                    focus_match = re.search(r"FOCUS:\s*(\d+)", response)
+                    if focus_match:
+                        try:
+                            hwnd = int(focus_match.group(1))
+                            self.select_window_by_hwnd(hwnd)
+                            self.append_chat("System", f"Cambiando a ventana {hwnd} por pedido de Clipo.", "system")
+                            # Remove the command from the displayed response if desired, 
+                            # or just leave it. Let's leave it for transparency.
+                        except Exception as e:
+                            logger.error(f"Error handling FOCUS command: {e}")
+                            
+                    # Check for LEARN: alias=target
+                    learn_match = re.search(r"LEARN:\s*(.+)=(.+)$", response, re.MULTILINE)
+                    if learn_match:
+                        alias = learn_match.group(1).strip()
+                        target = learn_match.group(2).strip()
+                        memory_manager.add_alias(alias, target)
+                        self.append_chat("System", f"Clipo ha aprendido un nuevo alias: '{alias}' -> '{target}'", "system")
+
+                    # Check for ACTION: [COMMAND]
+                    action_match = re.search(r"ACTION:\s*(.+)$", response, re.MULTILINE)
+                    if action_match:
+                        action_cmd = action_match.group(1).strip()
+                        self.append_chat("System", f"Ejecutando interacción solicitada por Clipo: {action_cmd}", "system")
+                        threading.Thread(target=self._command_worker, args=(action_cmd,), daemon=True).start()
+
+                    self.append_chat("Clipo", response, "bot")
                     self.btn_send.config(state="normal", text="Enviar")
                 elif msg_type == "error":
                     self.append_chat("Error", data, "system")
@@ -457,6 +516,36 @@ class WinAutomationApp:
         self.btn_voice_question.config(text=question_text, state=question_state)
         self.btn_voice_command.config(text=command_text, state=command_state)
         self.btn_voice_execute.config(state=command_state)
+        
+        if listening:
+            self.icon_btn.config(bg="#ef4444", activebackground="#dc2626") # Red palette
+            self._animate_listening(0)
+        else:
+            self.icon_btn.config(bg=ACCENT, activebackground="#2563eb") # Original blue
+
+    def _animate_listening(self, step):
+        if not self.is_listening:
+            # Restore original appearance and layout
+            self.icon_btn.place_forget()
+            self.icon_btn.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            self.icon_btn.config(bg=ACCENT)
+            return
+
+        # Pulsing colors
+        colors = ["#ef4444", "#f87171", "#dc2626", "#b91c1c"]
+        color = colors[step % len(colors)]
+        self.icon_btn.config(bg=color)
+
+        # Vibration effect (small displacement)
+        import random
+        dx = random.randint(-1, 1)
+        dy = random.randint(-1, 1)
+        
+        # When animating, use place to allow offset
+        # Note: self.root is 64x64
+        self.icon_btn.place(x=32+dx, y=32+dy, width=56, height=56, anchor="center")
+
+        self.root.after(80, lambda: self._animate_listening(step + 1))
 
     def start_voice_capture(self, target):
         if self.is_listening:
@@ -537,10 +626,6 @@ class WinAutomationApp:
             threading.Thread(target=self._type_worker, args=(text_to_type,), daemon=True).start()
 
     def cmd_send_command(self):
-        if not self.selected_window_hwnd:
-            messagebox.showwarning("Atención", "Seleccioná una ventana primero.")
-            return
-
         command = self.entry_command.get().strip()
         if not command:
             messagebox.showwarning("Atención", "Ingresá un comando para enviar.")
@@ -560,10 +645,11 @@ class WinAutomationApp:
     def _command_worker(self, command):
         try:
             window_info = self.windows_map.get(self.selected_window_hwnd)
-            if not window_info:
-                raise ValueError("La ventana seleccionada ya no está disponible.")
-
             parsed_command = parse_command(command, window_info, list(self.windows_map.values()))
+            
+            if not window_info and parsed_command["type"] != "switch_window":
+                raise ValueError("Se necesita seleccionar una ventana para este tipo de comando.")
+
             description = execute_parsed_command(
                 window_info,
                 parsed_command,
@@ -694,9 +780,14 @@ class WinAutomationApp:
         question = self.entry_question.get().strip()
         if not question:
             return
-        if not self.selected_window_hwnd:
-            messagebox.showwarning("Atención", "Seleccioná una ventana primero.")
+        if not self.selected_window_hwnd and not looks_like_automation_command(question):
+            messagebox.showwarning("Atención", "Seleccioná una ventana primero para poder chatear con Clipo.")
             return
+
+        lowered_q = question.lower()
+        if lowered_q.startswith("haga") or lowered_q.startswith("haz"):
+             self.ask_groq()
+             return
 
         if looks_like_automation_command(question):
             self.entry_question.delete(0, tk.END)
@@ -725,12 +816,31 @@ class WinAutomationApp:
         self.entry_question.delete(0, tk.END)
         self.btn_send.config(state="disabled", text="...")
 
-        SYSTEM_PROMPT = """
-        Eres Clipo, un asistente de Windows 10 experto en automatización.
-        Responde basándote en el contexto de la ventana seleccionada.
+        windows_summary = build_all_windows_summary(list(self.windows_map.values()))
+        memory_summary = memory_manager.get_summary()
+
+        SYSTEM_PROMPT = f"""
+        Eres Clipo, un asistente de Windows 10 experto en automatización que evoluciona con el tiempo.
+        
+        {memory_summary}
+        
+        Responde basándote en el contexto de la ventana seleccionada y la lista de ventanas abiertas.
+        Si el usuario te pide 'hacer' (haga, haz) algo, interpreta cuál es la ventana más relevante.
+        
+        Si necesitas que el usuario cambie a otra ventana para realizar una acción o para que tú puedas ver su contenido, 
+        incluye en tu respuesta el comando 'FOCUS: [HWND]' (reemplazando [HWND] por el identificador de la ventana).
+        
+        Si quieres realizar una acción directa dentro de la ventana seleccionada (como buscar un chat, escribir algo, etc.),
+        incluye 'ACTION: [comando]' (ej: 'ACTION: buscar chat Juan', 'ACTION: escribir hola enter').
+        
+        CAPACIDAD DE APRENDIZAJE:
+        Si el usuario te enseña algo nuevo (ej: 'WhatsApp ahora se llama Zap'), puedes guardarlo para siempre usando:
+        'LEARN: [alias]=[target_process_or_name]'.
+        
+        Al usar FOCUS, ACTION o LEARN, el sistema ejecutará la orden automáticamente.
         Sé directo y servicial.
         """
-        user_msg = f"CONTEXTO:\n{self.context_text}\n\nPREGUNTA:\n{question}"
+        user_msg = f"{windows_summary}\n\nCONTEXTO DE VENTANA SELECCIONADA:\n{self.context_text}\n\nPREGUNTA:\n{question}"
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]
         threading.Thread(target=self._groq_worker, args=(messages,), daemon=True).start()
 
