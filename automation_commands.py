@@ -152,6 +152,7 @@ AUTOMATION_PREFIXES = (
     "seleccionar ventana",
     "buscar",
     "busca",
+    "computadora",
 )
 
 

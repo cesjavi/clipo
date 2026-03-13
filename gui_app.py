@@ -76,6 +76,7 @@ class WinAutomationApp:
         self.context_text = ""
         self.icon_cache = {} # path -> PhotoImage
         self.is_listening = False
+        self.continuous_listening = False # New state for "Computadora Escuchar"
         self.window_frames = {}
         self._click_id = None
         self._drag_moved = False
@@ -491,6 +492,10 @@ class WinAutomationApp:
                 elif msg_type == "error":
                     self.append_chat("Error", data, "system")
                     self.btn_send.config(state="normal", text="Enviar")
+                    if self.continuous_listening:
+                        # If the error was a speech detection error, silent retry
+                        if "No speech was detected" in data or "No microphone audio" in data:
+                             self.root.after(500, lambda: self.start_voice_capture("continuous"))
                 elif msg_type == "automation_done":
                     self.append_chat("System", data, "system")
                 elif msg_type == "voice_result":
@@ -509,6 +514,10 @@ class WinAutomationApp:
 
     def set_voice_state(self, listening):
         self.is_listening = listening
+        
+        # Don't update buttons if we are in background continuous mode 
+        # unless we want visual feedback there too. Let's keep the icon feedback.
+        
         question_text = "Escuchando..." if listening else "Mic"
         command_text = "Escuchando..." if listening else "Dictar comando"
         question_state = "disabled" if listening else "normal"
@@ -518,10 +527,12 @@ class WinAutomationApp:
         self.btn_voice_execute.config(state=command_state)
         
         if listening:
-            self.icon_btn.config(bg="#ef4444", activebackground="#dc2626") # Red palette
+            self.icon_btn.config(bg="#ef4444")
             self._animate_listening(0)
         else:
-            self.icon_btn.config(bg=ACCENT, activebackground="#2563eb") # Original blue
+            # Only reset if not in continuous mode or if we are turning off
+            if not self.continuous_listening:
+                self.icon_btn.config(bg=ACCENT)
 
     def _animate_listening(self, step):
         if not self.is_listening:
@@ -557,13 +568,47 @@ class WinAutomationApp:
     def _voice_worker(self, target):
         try:
             text = recognize_once(timeout_seconds=8)
+            print(f"> CLIPO OYÓ: {text}") # Print to console
+            self.msg_queue.put(("voice_state", False)) # Clear state before processing result
             self.msg_queue.put(("voice_result", (target, text)))
         except Exception as e:
-            self.msg_queue.put(("error", f"Error de voz: {e}"))
-        finally:
             self.msg_queue.put(("voice_state", False))
+            self.msg_queue.put(("error", f"Error de voz: {e}"))
 
     def apply_voice_text(self, target, text):
+        # Normalize text for detection: lowercase and remove punctuation
+        lowered = re.sub(r'[.,:;!?]', '', text.lower())
+        print(f"  [DEBUG] Clipo analizando (target={target}): '{lowered}'")
+        
+        # Check for wake word / trigger command
+        if "computadora" in lowered and ("escuchar" in lowered or "escucha" in lowered):
+            if not self.continuous_listening:
+                self.continuous_listening = True
+                self.append_chat("System", "📢 MODO CONTINUO ACTIVADO. Decí 'Computadora' seguido de tu orden.", "system")
+            self.start_voice_capture("continuous")
+            return
+            
+        if "computadora" in lowered and ("detener" in lowered or "dejar de escuchar" in lowered or "parar" in lowered):
+            self.continuous_listening = False
+            self.append_chat("System", "🔇 Modo continuo desactivado.", "system")
+            return
+
+        if target == "continuous":
+            if "computadora" in lowered:
+                # Extract what comes after "computadora"
+                idx = lowered.find("computadora") + len("computadora")
+                command = text[idx:].strip(" .,:;!?")
+                if command:
+                    self.entry_command.delete(0, tk.END)
+                    self.entry_command.insert(0, command)
+                    self.append_chat("System", f"🤖 Computadora ejecutando: {command}", "system")
+                    self.cmd_send_command()
+            
+            # Restart continuous listening if still active
+            if self.continuous_listening:
+                self.root.after(400, lambda: self.start_voice_capture("continuous"))
+            return
+
         if target == "question" and looks_like_automation_command(text):
             self.entry_command.delete(0, tk.END)
             self.entry_command.insert(0, text)
@@ -645,7 +690,12 @@ class WinAutomationApp:
     def _command_worker(self, command):
         try:
             window_info = self.windows_map.get(self.selected_window_hwnd)
-            parsed_command = parse_command(command, window_info, list(self.windows_map.values()))
+            # Allow "computadora" prefix in the command itself
+            cmd_to_parse = command
+            if command.lower().startswith("computadora "):
+                cmd_to_parse = command[len("computadora "):].strip()
+
+            parsed_command = parse_command(cmd_to_parse, window_info, list(self.windows_map.values()))
             
             if not window_info and parsed_command["type"] != "switch_window":
                 raise ValueError("Se necesita seleccionar una ventana para este tipo de comando.")
@@ -780,20 +830,43 @@ class WinAutomationApp:
         question = self.entry_question.get().strip()
         if not question:
             return
-        if not self.selected_window_hwnd and not looks_like_automation_command(question):
+
+        lowered_q = question.lower()
+        
+        # 1. Background / System commands first (don't need window)
+        if "computadora escuchar" in lowered_q:
+            self.continuous_listening = True
+            self.append_chat("System", "Modo continuo activado desde texto. Decí 'Computadora' seguido de tu orden.", "system")
+            self.entry_question.delete(0, tk.END)
+            self.start_voice_capture("continuous")
+            return
+            
+        if "computadora detener" in lowered_q or "computadora dejar de escuchar" in lowered_q:
+            self.continuous_listening = False
+            self.append_chat("System", "Modo continuo desactivado.", "system")
+            self.entry_question.delete(0, tk.END)
+            return
+
+        # 2. Automation commands (might not need window if it's a switch command)
+        if looks_like_automation_command(question):
+            self.entry_question.delete(0, tk.END)
+            # Remove "computadora" prefix if present for cleaner display and parsing
+            display_cmd = question
+            if lowered_q.startswith("computadora "):
+                display_cmd = question[len("computadora "):].strip()
+                
+            self.append_chat("System", f"Detectado como comando: {display_cmd}", "system")
+            threading.Thread(target=self._command_worker, args=(question,), daemon=True).start()
+            return
+
+        # 3. LLM/Chat needs a window selection
+        if not self.selected_window_hwnd:
             messagebox.showwarning("Atención", "Seleccioná una ventana primero para poder chatear con Clipo.")
             return
 
-        lowered_q = question.lower()
         if lowered_q.startswith("haga") or lowered_q.startswith("haz"):
              self.ask_groq()
              return
-
-        if looks_like_automation_command(question):
-            self.entry_question.delete(0, tk.END)
-            self.append_chat("System", f"Detectado como comando: {question}", "system")
-            threading.Thread(target=self._command_worker, args=(question,), daemon=True).start()
-            return
 
         self.ask_groq()
 
